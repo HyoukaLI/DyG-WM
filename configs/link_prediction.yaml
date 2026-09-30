@@ -1,0 +1,414 @@
+# Link-prediction configuration for DyG-WM and the baselines.
+#
+# Every run reads the shared protocol (split / link / training), the section
+# of the selected model, and finally the dataset entry under `datasets`, whose
+# keys are deep-merged on top (dataset-specific hyperparameters).
+
+data_dir: processed_data
+seeds: [0, 1, 2, 3, 4]
+
+# Chronological 70/15/15 split of the 50 equal-event snapshots (no shuffling
+# across split boundaries).  Every model sees the same windows of
+# `window_size` snapshots.
+split:
+  train_ratio: 0.70
+  validation_ratio: 0.15
+  window_size: 4
+
+# DyGLib evaluation protocol: one positive and one negative per event, the
+# negative destination drawn from every destination of the full stream, and
+# AP/AUC averaged over batches of 200 positive events.  The negative strategy
+# (random / historical / inductive) is chosen on the command line.
+link:
+  negative_ratio: 1.0
+  max_positive_pairs: null
+  allow_negative_collisions: true
+  eval_positive_batch_size: 200
+  new_edges_only: false
+  undirected: false
+
+# DyGLib inductive (new-node) setting, used with `--setting inductive`.
+inductive_setting:
+  new_node_ratio: 0.1
+  new_node_seed: 2020
+
+# Shared evaluation / checkpoint rule.  Optimizers are model-specific.
+training:
+  eval_every: 1
+  patience: 20
+  checkpoint_metrics: [ap, auc]
+  validation_query_seed: 0
+  test_query_seed: 2
+
+# ----------------------------------------------------------------------------
+# DyG-WM
+# ----------------------------------------------------------------------------
+dyg_wm:
+  # snapshot encoder
+  hidden_dim: 128
+  rwpe_dim: 4
+  rwpe_walks: 8
+  rwpe_seed: 42
+  cache_rwpe: true
+  time_dim: 32
+  gnn_layers: 2
+  predictor_hidden_dim: 256
+  # relation-centric module and path signatures
+  event_dim: 16
+  signature_depth: 2
+  subgraph_budget: 32
+  path_decay: 0.8
+  bridge_weight: 1.0
+  # causal event history strictly before every query timestamp
+  use_causal_history: true
+  history_semantic_dim: 16
+  # transductive ID residual of the link head (0 disables it)
+  id_embedding_dim: 64
+  # JEPA targets: EMA target encoders updated after every optimizer step
+  ema_momentum: 0.999
+  ema_steps_per_epoch: null
+  ema_update_per_step: true
+  # link head / training queries
+  initial_link_logit_bias: 0.0
+  shuffle_windows: true
+  train_max_positive_pairs: null
+  # loss weights
+  node_loss_weight: 0.02
+  relation_loss_weight: 0.02
+  link_loss_weight: 1.0
+  rank_loss_weight: 1.0
+  variance_loss_weight: 0.005
+  covariance_loss_weight: 0.0005
+  variance_target: 0.5
+
+dyg_wm_training:
+  epochs: 100
+  pair_batch_size: 400
+  learning_rate: 0.0003
+  lr_reduce_factor: 0.5
+  lr_patience: 5
+  min_learning_rate: 0.00001
+  weight_decay: 0.00001
+  grad_clip: 1.0
+  eval_every: 1
+  patience: 20
+  # The parameter-free causal recurrence prior is a valid predictor on its
+  # own; it is kept as the epoch-0 checkpoint if training does not improve it.
+  evaluate_before_training: true
+
+# ----------------------------------------------------------------------------
+# Baselines (DyGLib implementations; dataset entries override DyGLib's
+# reported best settings)
+# ----------------------------------------------------------------------------
+edgebank:
+  memory_mode: time_window_memory
+  time_window_proportion: 0.15
+
+# JODIE as implemented in DyGLib (memory model with the time-projection
+# embedding).
+jodie:
+  interaction_feature_dim: 172
+  time_feat_dim: 100
+  num_layers: 1
+  num_heads: 2
+  num_neighbors: 10
+  dropout: 0.1
+  sample_neighbor_strategy: recent
+  train_batch_size: 200
+  eval_pair_batch_size: 200
+
+dyrep:
+  interaction_feature_dim: 172
+  time_feat_dim: 100
+  num_layers: 1
+  num_heads: 2
+  num_neighbors: 10
+  dropout: 0.1
+  sample_neighbor_strategy: recent
+  train_batch_size: 200
+  eval_pair_batch_size: 200
+
+tgat:
+  interaction_feature_dim: 172
+  num_layers: 2
+  num_heads: 2
+  num_neighbors: 20
+  dropout: 0.1
+  uniform_neighbors: true
+  train_batch_size: 200
+  eval_group_batch_size: 16
+
+tgn:
+  interaction_feature_dim: 172
+  time_feat_dim: 100
+  num_layers: 1
+  num_heads: 2
+  num_neighbors: 10
+  dropout: 0.1
+  sample_neighbor_strategy: recent
+  train_batch_size: 200
+  eval_pair_batch_size: 200
+
+cawn:
+  interaction_feature_dim: 172
+  time_feat_dim: 100
+  position_feat_dim: 172
+  walk_length: 1
+  num_walk_heads: 8
+  num_neighbors: 32
+  dropout: 0.1
+  sample_neighbor_strategy: time_interval_aware
+  time_scaling_factor: 0.000001
+  train_batch_size: 200
+  eval_pair_batch_size: 200
+
+tcl:
+  interaction_feature_dim: 172
+  time_feat_dim: 100
+  num_layers: 2
+  num_heads: 2
+  num_neighbors: 20
+  dropout: 0.1
+  sample_neighbor_strategy: recent
+  train_batch_size: 200
+  eval_pair_batch_size: 200
+
+graphmixer:
+  interaction_feature_dim: 172
+  time_feat_dim: 100
+  num_layers: 2
+  num_neighbors: 30
+  time_gap: 2000
+  dropout: 0.5
+  sample_neighbor_strategy: recent
+  train_batch_size: 200
+  eval_pair_batch_size: 200
+
+dygformer:
+  interaction_feature_dim: 172
+  time_feat_dim: 100
+  channel_embedding_dim: 50
+  patch_size: 1
+  num_layers: 2
+  num_heads: 2
+  dropout: 0.1
+  max_input_sequence_length: 32
+  sample_neighbor_strategy: recent
+  train_batch_size: 200
+  eval_pair_batch_size: 200
+
+# TGAT author-code optimizer defaults.
+tgat_training:
+  epochs: 50
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  grad_clip: 1.0
+  patience: 20
+
+# DyGLib optimizer defaults (the DyGLib training loop does not clip gradients;
+# grad_clip is ignored by these models).
+jodie_training: &dyglib_training
+  epochs: 100
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  grad_clip: 1.0
+  patience: 20
+
+dyrep_training:
+  <<: *dyglib_training
+
+tgn_training:
+  <<: *dyglib_training
+
+cawn_training:
+  <<: *dyglib_training
+
+tcl_training:
+  <<: *dyglib_training
+
+graphmixer_training:
+  <<: *dyglib_training
+
+dygformer_training:
+  <<: *dyglib_training
+
+# ----------------------------------------------------------------------------
+# Dataset-specific settings
+# ----------------------------------------------------------------------------
+datasets:
+  wikipedia:
+    dyg_wm:
+      hidden_dim: 128
+      rwpe_dim: 4
+      rwpe_walks: 8
+      time_dim: 32
+      predictor_hidden_dim: 256
+      event_dim: 16
+      subgraph_budget: 32
+      history_semantic_dim: 32
+      id_embedding_dim: 128
+      id_embedding_dropout: 0.2
+      initial_id_score_scale: 0.5
+      train_negative_ratio: 4.0
+      node_loss_weight: 0.01
+      relation_loss_weight: 0.01
+      rank_loss_weight: 1.0
+      variance_loss_weight: 0.002
+      covariance_loss_weight: 0.0002
+    dyg_wm_training:
+      epochs: 60
+      pair_batch_size: 500
+      learning_rate: 0.0001
+      lr_patience: 4
+      min_learning_rate: 0.000005
+      weight_decay: 0.00001
+      patience: 12
+
+  mooc:
+    dyg_wm:
+      shuffle_windows: false
+      hidden_dim: 128
+      rwpe_dim: 4
+      rwpe_walks: 8
+      time_dim: 32
+      predictor_hidden_dim: 256
+      event_dim: 16
+      subgraph_budget: 32
+      history_semantic_dim: 32
+      id_embedding_dim: 0
+      train_negative_ratio: 16.0
+      node_loss_weight: 0.01
+      relation_loss_weight: 0.01
+      rank_loss_weight: 1.0
+      variance_loss_weight: 0.002
+      covariance_loss_weight: 0.0002
+    dyg_wm_training:
+      epochs: 60
+      pair_batch_size: 1700
+      learning_rate: 0.0001
+      lr_patience: 4
+      min_learning_rate: 0.000005
+      weight_decay: 0.00001
+      patience: 12
+    dyrep: {dropout: 0.0}
+    tgat: {uniform_neighbors: false}
+    tgn: {dropout: 0.2}
+    cawn: {num_neighbors: 64}
+    graphmixer: {num_neighbors: 20, dropout: 0.4}
+    dygformer: {patch_size: 8, max_input_sequence_length: 256}
+    jodie: {dropout: 0.2}
+
+  lastfm:
+    dyrep: {dropout: 0.0}
+    tgat: {uniform_neighbors: false}
+    tgn: {dropout: 0.3}
+    cawn: {num_neighbors: 128}
+    graphmixer: {num_neighbors: 10, dropout: 0.0}
+    dygformer: {patch_size: 16, max_input_sequence_length: 512}
+    jodie: {dropout: 0.3}
+
+  canparl:
+    dyg_wm:
+      use_causal_history: false
+      hidden_dim: 128
+      rwpe_dim: 4
+      rwpe_walks: 8
+      time_dim: 32
+      predictor_hidden_dim: 256
+      event_dim: 16
+      subgraph_budget: 32
+      history_semantic_dim: 16
+      id_embedding_dim: 0
+      train_negative_ratio: 4.0
+      node_loss_weight: 0.01
+      relation_loss_weight: 0.01
+      rank_loss_weight: 1.0
+      variance_loss_weight: 0.002
+      covariance_loss_weight: 0.0002
+    dyg_wm_training:
+      epochs: 60
+      pair_batch_size: 500
+      learning_rate: 0.0001
+      lr_patience: 4
+      min_learning_rate: 0.000005
+      weight_decay: 0.00001
+      patience: 12
+    dyrep: {dropout: 0.0, sample_neighbor_strategy: uniform}
+    tgat: {dropout: 0.2, uniform_neighbors: true}
+    tgn: {dropout: 0.3, sample_neighbor_strategy: uniform}
+    cawn: {num_neighbors: 128, dropout: 0.0}
+    tcl: {dropout: 0.2, sample_neighbor_strategy: uniform}
+    graphmixer: {num_neighbors: 20, dropout: 0.2, sample_neighbor_strategy: uniform}
+    dygformer: {patch_size: 64, max_input_sequence_length: 2048, dropout: 0.1}
+    jodie: {dropout: 0.0}
+
+  contacts:
+    dyrep: {dropout: 0.0, sample_neighbor_strategy: recent}
+    tgat: {dropout: 0.1, uniform_neighbors: false}
+    tgn: {dropout: 0.1, sample_neighbor_strategy: recent}
+    cawn: {num_neighbors: 64, dropout: 0.1}
+    tcl: {dropout: 0.0, sample_neighbor_strategy: recent}
+    graphmixer: {num_neighbors: 20, dropout: 0.1, sample_neighbor_strategy: recent}
+    dygformer: {patch_size: 1, max_input_sequence_length: 32, dropout: 0.0}
+
+  flights:
+    dyrep: {dropout: 0.1, sample_neighbor_strategy: recent}
+    tgat: {dropout: 0.1, uniform_neighbors: false}
+    tgn: {dropout: 0.1, sample_neighbor_strategy: recent}
+    cawn: {num_neighbors: 64, dropout: 0.1}
+    tcl: {dropout: 0.1, sample_neighbor_strategy: recent}
+    graphmixer: {num_neighbors: 20, dropout: 0.2, sample_neighbor_strategy: recent}
+    dygformer: {patch_size: 8, max_input_sequence_length: 256, dropout: 0.1}
+
+  untrade:
+    dyrep: {dropout: 0.1, sample_neighbor_strategy: recent}
+    # UN Trade's only event feature is the raw trade volume (up to ~5.25e7).
+    # TGAT has no per-layer normalisation, so its copy of the features is
+    # log-scaled, sign(x) * log1p(|x|); no other model is affected.
+    tgat: {dropout: 0.1, uniform_neighbors: true, edge_feature_transform: log1p}
+    tgn: {dropout: 0.2, sample_neighbor_strategy: recent}
+    cawn: {num_neighbors: 64, dropout: 0.1}
+    tcl: {dropout: 0.0, sample_neighbor_strategy: uniform}
+    graphmixer: {num_neighbors: 20, dropout: 0.1, sample_neighbor_strategy: uniform}
+    dygformer: {patch_size: 8, max_input_sequence_length: 256, dropout: 0.0}
+    jodie: {dropout: 0.4}
+
+  unvote:
+    dyrep: {dropout: 0.1, sample_neighbor_strategy: recent}
+    tgat: {dropout: 0.2, uniform_neighbors: false}
+    tgn: {dropout: 0.1, sample_neighbor_strategy: uniform}
+    cawn: {num_neighbors: 64, dropout: 0.1}
+    tcl: {dropout: 0.0, sample_neighbor_strategy: uniform}
+    graphmixer: {num_neighbors: 20, dropout: 0.0, sample_neighbor_strategy: uniform}
+    dygformer: {patch_size: 4, max_input_sequence_length: 128, dropout: 0.2}
+
+  uslegis:
+    dyrep: {dropout: 0.0, sample_neighbor_strategy: recent}
+    tgat: {dropout: 0.1, uniform_neighbors: false}
+    tgn: {dropout: 0.1, sample_neighbor_strategy: recent}
+    cawn: {num_neighbors: 32, dropout: 0.1}
+    tcl: {dropout: 0.3, sample_neighbor_strategy: uniform}
+    graphmixer: {num_neighbors: 20, dropout: 0.4, sample_neighbor_strategy: recent}
+    dygformer: {patch_size: 8, max_input_sequence_length: 256, dropout: 0.0}
+    jodie: {dropout: 0.2}
+
+  enron:
+    dyrep: {dropout: 0.0, sample_neighbor_strategy: recent}
+    tgat: {dropout: 0.2, uniform_neighbors: false}
+    tgn: {dropout: 0.0, sample_neighbor_strategy: recent}
+    cawn: {num_neighbors: 32, dropout: 0.1}
+    tcl: {dropout: 0.1, sample_neighbor_strategy: recent}
+    graphmixer: {num_neighbors: 20, dropout: 0.5, sample_neighbor_strategy: recent}
+    dygformer: {patch_size: 8, max_input_sequence_length: 256, dropout: 0.0}
+
+  uci:
+    dyrep: {dropout: 0.0, sample_neighbor_strategy: recent}
+    tgat: {dropout: 0.1, uniform_neighbors: false}
+    tgn: {dropout: 0.1, sample_neighbor_strategy: recent}
+    cawn: {num_neighbors: 64, dropout: 0.1}
+    tcl: {dropout: 0.0, sample_neighbor_strategy: recent}
+    graphmixer: {num_neighbors: 20, dropout: 0.4, sample_neighbor_strategy: recent}
+    dygformer: {patch_size: 1, max_input_sequence_length: 32, dropout: 0.1}
+    jodie: {dropout: 0.4}
