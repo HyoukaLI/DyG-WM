@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 import numpy as np
 import torch
@@ -113,6 +116,15 @@ class DynamicGraph:
             self.num_source_nodes,
         )
 
+    def windows(self, window_size: int) -> Iterable[list[Snapshot]]:
+        """Non-overlapping windows of ``window_size`` snapshots (node
+        classification); an incomplete tail is dropped."""
+        if window_size < 2:
+            raise ValueError("window_size must be >= 2")
+        usable = len(self.snapshots) // window_size * window_size
+        for start in range(0, usable, window_size):
+            yield self.snapshots[start : start + window_size]
+
 
 def load_npz(path: str | Path) -> DynamicGraph:
     """Load a processed dynamic graph archive (``processed_data/<name>.npz``).
@@ -127,6 +139,18 @@ def load_npz(path: str | Path) -> DynamicGraph:
     """
     raw = np.load(Path(path), allow_pickle=True)
     features = raw["features"]
+    if "feature_source" in raw and str(raw["feature_source"]) == "structural-fallback":
+        message = (
+            f"{path} carries the 4-D structural fallback instead of the SpikeNet "
+            "DeepWalk features; node-classification results will NOT match the "
+            "SpikeNet / SG-JEPA protocol (every model degenerates to the majority "
+            "class). Rebuild the archive with the <dataset>.npy features (see "
+            "DG_data/DATASETS_README.md). Set DYGWM_ALLOW_STRUCTURAL_FALLBACK=1 to "
+            "run the fallback protocol on purpose."
+        )
+        if os.environ.get("DYGWM_ALLOW_STRUCTURAL_FALLBACK", "0") != "1":
+            raise RuntimeError(message)
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
     if features.ndim == 3 and any(not np.any(features[t]) for t in range(features.shape[0])):
         raise RuntimeError(
             f"{path}: at least one snapshot has all-zero node features; the archive "

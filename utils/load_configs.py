@@ -17,7 +17,13 @@ MODEL_KEYS = {
     "TCL": "tcl",
     "GraphMixer": "graphmixer",
     "DyGFormer": "dygformer",
+    "CLDG": "cldg",
+    "MaskDGNN": "maskdgnn",
+    "DVGMAE": "dvgmae",
+    "JODIE-Bipartite": "jodie_bipartite",
 }
+
+SNAPSHOT_SSL_MODELS = ("cldg", "maskdgnn", "dvgmae")
 
 DATASETS = (
     "wikipedia", "mooc", "lastfm", "enron", "uci", "canparl",
@@ -67,7 +73,7 @@ def load_config(config_path: str | Path, dataset_name: str) -> dict:
     config["dataset_name"] = dataset_name
     config["data"] = {"path": str(data_dir / f"{dataset_name}.npz")}
     if "window_size" in config.get("dyg_wm", {}):
-        raise ValueError("set the window size under split.window_size")
+        raise ValueError("set the window size under split.window_size / window_size")
     return config
 
 
@@ -87,8 +93,50 @@ def model_arguments(config: dict, key: str) -> dict:
 
 
 def training_arguments(config: dict, key: str) -> dict:
-    """Shared evaluation/checkpoint settings overlaid with ``<key>_training``."""
+    """Shared evaluation/checkpoint settings overlaid with ``<key>_training``.
+
+    The snapshot SSL baselines use their own complete ``<key>_training``."""
+    if key in SNAPSHOT_SSL_MODELS:
+        return dict(config.get(f"{key}_training", {}))
     return {
         **dict(config.get("training", {})),
         **dict(config.get(f"{key}_training", {})),
     }
+
+
+# ----------------------------------------------------------------------------
+# Node classification
+# ----------------------------------------------------------------------------
+NODE_MODEL_KEYS = {
+    "DyG-WM": "dyg_wm",
+    "SG-JEPA": "sg_jepa",
+    "EvolveGCN-H": "evolvegcn_h",
+    "ROLAND": "roland",
+    "TGN": "tgn",
+    "TGAT": "tgat",
+    "CAWN": "cawn",
+    "TCL": "tcl",
+    "GraphMixer": "graphmixer",
+    "DyGFormer": "dygformer",
+    "CLDG": "cldg",
+    "MaskDGNN": "maskdgnn",
+    "DVGMAE": "dvgmae",
+}
+
+NODE_DATASETS = ("dblp", "tmall", "patent")
+
+
+def node_model_key(model_name: str) -> str:
+    lookup = {name.lower(): key for name, key in NODE_MODEL_KEYS.items()}
+    lookup.update({key: key for key in NODE_MODEL_KEYS.values()})
+    try:
+        return lookup[model_name.lower()]
+    except KeyError:
+        raise ValueError(
+            f"unknown node model {model_name!r}; choose from {list(NODE_MODEL_KEYS)}"
+        ) from None
+
+
+def load_node_config(config_path: str | Path, dataset_name: str) -> dict:
+    """Load the node-classification YAML and apply the entry of ``dataset_name``."""
+    return load_config(config_path, dataset_name)

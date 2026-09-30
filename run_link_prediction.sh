@@ -6,7 +6,8 @@
 #   STRATEGY=historical bash run_link_prediction.sh wikipedia uci
 #
 # Environment variables:
-#   MODEL     DyG-WM | JODIE | DyRep | TGAT | TGN | CAWN | EdgeBank | TCL | GraphMixer | DyGFormer
+#   MODEL     DyG-WM | JODIE | DyRep | TGAT | TGN | CAWN | EdgeBank | TCL | GraphMixer |
+#             DyGFormer | CLDG | MaskDGNN | DVGMAE | JODIE-Bipartite (bipartite datasets only)
 #   GPU       GPU index, -1 for CPU (default 0)
 #   STRATEGY  evaluation negatives: random | historical | inductive (default random)
 #   SETTING   transductive | inductive (default transductive)

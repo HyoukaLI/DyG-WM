@@ -8,7 +8,7 @@ import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
 
-from models.dygwm_layers import (
+from models.layers import (
     GraphSAGE,
     random_walk_positional_encoding,
     signature_dimension,
@@ -62,10 +62,31 @@ class PreparedWindow:
         self.mean_relation_gate = None
 
 
+@dataclass
+class DyGWMNodeOutput:
+    prediction: Tensor
+    target: Tensor
+    node_ids: Tensor
+    mean_relation_gate: Tensor
+    representation: Tensor
+
+
 def _normalized_distance(prediction: Tensor, target: Tensor) -> Tensor:
     prediction = F.normalize(prediction, dim=-1)
     target = F.normalize(target.detach(), dim=-1)
     return (prediction - target).square().sum(dim=-1).mean()
+
+
+def _contrastive_prediction_loss(
+    prediction: Tensor, target: Tensor, temperature: float
+) -> Tensor:
+    if prediction.shape[0] < 2:
+        return prediction.sum() * 0.0
+    prediction = F.normalize(prediction, dim=-1)
+    target = F.normalize(target.detach(), dim=-1)
+    logits = prediction @ target.T / temperature
+    labels = torch.arange(logits.shape[0], device=logits.device)
+    return F.cross_entropy(logits, labels)
 
 
 _QUERY_CAP_UNSET = object()
@@ -143,7 +164,7 @@ def _query_group_batches(queries: LinkQueries, pair_batch_size: int | None) -> l
 
 
 class DyGWM(nn.Module):
-    """DyG-WM: predictive dynamic graph world model for link prediction.
+    """DyG-WM: predictive dynamic graph world model.
 
     A window of ``window_size`` snapshots is split into a context
     ``C_t = (G_{t-W+1}, ..., G_{t-1})`` and a target snapshot ``G_t``.  The
@@ -202,6 +223,8 @@ class DyGWM(nn.Module):
         allow_negative_collisions: bool = False,
         eval_positive_batch_size: int | None = None,
         node_loss_weight: float = 1.0,
+        node_contrastive_loss_weight: float = 0.5,
+        contrastive_temperature: float = 0.2,
         relation_loss_weight: float = 1.0,
         link_loss_weight: float = 1.0,
         rank_loss_weight: float = 0.0,
@@ -270,6 +293,8 @@ class DyGWM(nn.Module):
         self.eval_positive_batch_size = eval_positive_batch_size
         self.signature_depth = signature_depth
         self.node_loss_weight = node_loss_weight
+        self.node_contrastive_loss_weight = node_contrastive_loss_weight
+        self.contrastive_temperature = contrastive_temperature
         self.relation_loss_weight = relation_loss_weight
         self.link_loss_weight = link_loss_weight
         self.rank_loss_weight = rank_loss_weight
@@ -438,14 +463,14 @@ class DyGWM(nn.Module):
         self.id_score_scale = nn.Parameter(
             torch.tensor(float(initial_id_score_scale))
         )
-        # Node-level readout parameters of the node-classification variant.
-        # They are not used for link prediction but are kept so that parameter
-        # initialisation (and hence the random-number stream) matches the
-        # released results exactly.
+        # Node-classification readout: a zero-initialised residual of the
+        # temporal node context on top of the frozen multi-hop content views.
         self.homophily_residual = nn.Linear(hidden_dim, hidden_dim)
         nn.init.zeros_(self.homophily_residual.weight)
         nn.init.zeros_(self.homophily_residual.bias)
         self.homophily_residual_logit = nn.Parameter(torch.tensor(-2.0))
+        # Initial hop2/hop4/hop5 blend of 0.2/0.1/0.7; the logits are
+        # log-weights so the softmax recovers this prior.
         self.hop_blend_logits = nn.Parameter(
             torch.tensor([-1.6094379, -2.3025851, -0.3566749])
         )
@@ -773,6 +798,42 @@ class DyGWM(nn.Module):
         scale = torch.sigmoid(self.node_dynamics_logit)
         return self.node_prediction_norm(node_context + scale * innovation)
 
+    def _content_views(self, snapshot: Snapshot) -> dict[str, Tensor]:
+        """Frozen content skip plus multi-hop homophily views."""
+        content = self.feature_skip(snapshot.x)
+        hop1 = neighbor_mean_embeddings(snapshot, content, self.undirected)
+        hop2 = neighbor_mean_embeddings(snapshot, hop1, self.undirected)
+        hop4 = neighbor_mean_embeddings(snapshot, hop2, self.undirected)
+        hop4 = neighbor_mean_embeddings(snapshot, hop4, self.undirected)
+        hop5 = neighbor_mean_embeddings(snapshot, hop4, self.undirected)
+        hop6 = neighbor_mean_embeddings(snapshot, hop5, self.undirected)
+        hop8 = neighbor_mean_embeddings(snapshot, hop6, self.undirected)
+        hop8 = neighbor_mean_embeddings(snapshot, hop8, self.undirected)
+        return {
+            "content": content,
+            "hop1": hop1,
+            "hop2": hop2,
+            "hop4": hop4,
+            "hop5": hop5,
+            "hop6": hop6,
+            "hop8": hop8,
+        }
+
+    def _homophily_state(self, snapshot: Snapshot) -> Tensor:
+        """Default 2-hop mean of the frozen content skip."""
+        return self._content_views(snapshot)["hop2"]
+
+    def _predict_homophily_future(
+        self,
+        node_context: Tensor,
+        horizon_encoding: Tensor,
+        backbone: Tensor,
+    ) -> Tensor:
+        innovation = self.node_predictor(
+            torch.cat([node_context, horizon_encoding], dim=-1)
+        )
+        return backbone + innovation
+
     def _pool_relation_context(
         self,
         embeddings: Tensor,
@@ -979,6 +1040,39 @@ class DyGWM(nn.Module):
             negative_edges=self.negative_edge_table,
         )
 
+    def _node_predictions(
+        self, prepared: PreparedWindow
+    ) -> DyGWMNodeOutput:
+        if prepared.target_embedding is None:
+            raise ValueError(
+                "node predictions require prepare_window(..., with_target=True)"
+            )
+        node_context, mean_gate = self._node_context(prepared)
+        horizon = max(
+            1,
+            prepared.target_snapshot.time - prepared.context_snapshots[-1].time,
+        )
+        horizon_encoding = sinusoidal_time_encoding(
+            horizon, self.time_dim, node_context.device
+        ).expand(node_context.shape[0], -1)
+        backbone = self._homophily_state(prepared.context_snapshots[-1])
+        node_prediction = self._predict_homophily_future(
+            node_context, horizon_encoding, backbone
+        )
+        # The sole future target is the EMA node latent.  We intentionally avoid
+        # explicit future-neighborhood, added-neighbor, and structure targets.
+        latent_target = prepared.target_embedding.detach()
+        node_ids = prepared.target_snapshot.active.nonzero(as_tuple=False).flatten()
+        if node_ids.numel() == 0:
+            raise ValueError("target snapshot has no active nodes")
+        return DyGWMNodeOutput(
+            prediction=node_prediction[node_ids],
+            target=latent_target[node_ids],
+            node_ids=node_ids,
+            mean_relation_gate=mean_gate,
+            representation=backbone[node_ids],
+        )
+
     def _node_context(
         self, prepared: PreparedWindow
     ) -> tuple[Tensor, Tensor]:
@@ -1037,11 +1131,8 @@ class DyGWM(nn.Module):
         )
         history_scale = torch.sigmoid(self.node_history_logit)
         homophily_scale = torch.sigmoid(self.node_homophily_logit)
-        # One- and two-hop means of the frozen content projection of the most
-        # recent context snapshot (homophily prior of the node path).
-        content = self.feature_skip(snapshots[-1].x)
-        hop1 = neighbor_mean_embeddings(snapshots[-1], content, self.undirected)
-        hop2 = neighbor_mean_embeddings(snapshots[-1], hop1, self.undirected)
+        views = self._content_views(snapshots[-1])
+        hop1, hop2 = views["hop1"], views["hop2"]
         individual_context = self.node_history_norm(
             embeddings[-1]
             + history_scale * individual_hidden
@@ -1057,6 +1148,147 @@ class DyGWM(nn.Module):
             individual_context + relation_gate * relation_update
         )
         return node_context, relation_gate
+
+    def node_loss_windows(
+        self,
+        windows: Sequence[Sequence[Snapshot]],
+        node_batch_size: int | None = None,
+    ) -> tuple[Tensor, dict[str, float]]:
+        losses = []
+        node_losses = []
+        contrastive_losses = []
+        variance_losses = []
+        covariance_losses = []
+        relation_gates = []
+        for window in windows:
+            output = self._node_predictions(self.prepare_window(window))
+            order = torch.randperm(output.prediction.shape[0], device=output.prediction.device)
+            size = output.prediction.shape[0] if node_batch_size is None else node_batch_size
+            for start in range(0, output.prediction.shape[0], size):
+                index = order[start : start + size]
+                prediction = output.prediction[index]
+                target = output.target[index]
+                node_loss = _normalized_distance(prediction, target)
+                contrastive_loss = _contrastive_prediction_loss(
+                    prediction, target, self.contrastive_temperature
+                )
+                variance_loss, covariance_loss = _variance_covariance_loss(
+                    prediction, self.variance_target
+                )
+                loss = (
+                    self.node_loss_weight * node_loss
+                    + self.node_contrastive_loss_weight * contrastive_loss
+                    + self.variance_loss_weight * variance_loss
+                    + self.covariance_loss_weight * covariance_loss
+                )
+                losses.append(loss)
+                node_losses.append(node_loss.detach())
+                contrastive_losses.append(contrastive_loss.detach())
+                variance_losses.append(variance_loss.detach())
+                covariance_losses.append(covariance_loss.detach())
+            relation_gates.append(output.mean_relation_gate)
+        if not losses:
+            raise ValueError("no temporal windows were provided")
+        loss = torch.stack(losses).mean()
+        return loss, {
+            "loss": float(loss.detach().item()),
+            "node_loss": float(torch.stack(node_losses).mean().item()),
+            "contrastive_loss": float(torch.stack(contrastive_losses).mean().item()),
+            "variance_loss": float(torch.stack(variance_losses).mean().item()),
+            "covariance_loss": float(torch.stack(covariance_losses).mean().item()),
+            "relation_gate": float(torch.stack(relation_gates).mean().item()),
+            "graph_scale": float(torch.sigmoid(self.snapshot_graph_logit).detach().item()),
+            "history_scale": float(torch.sigmoid(self.node_history_logit).detach().item()),
+            "homophily_scale": float(torch.sigmoid(self.node_homophily_logit).detach().item()),
+            "dynamics_scale": float(torch.sigmoid(self.node_dynamics_logit).detach().item()),
+        }
+
+    def blend_content_hops(self, views: dict[str, Tensor]) -> Tensor:
+        weights = F.softmax(self.hop_blend_logits, dim=0)
+        return (
+            weights[0] * views["hop2"]
+            + weights[1] * views["hop4"]
+            + weights[2] * views["hop5"]
+        )
+
+    def _encoder_multihop(self, snapshot: Snapshot, hops: int) -> Tensor:
+        state = self.encode_snapshot(snapshot, target=False)
+        for _ in range(hops):
+            state = neighbor_mean_embeddings(snapshot, state, self.undirected)
+        return state
+
+    def encode_temporal_state(self, snapshots: Sequence[Snapshot]) -> Tensor:
+        """Encode a contiguous snapshot sequence ending at the readout time.
+
+        Unlike the JEPA context branch, the final snapshot is included so the
+        downstream representation can use the complete cumulative graph together
+        with short-term relational dynamics.
+        """
+        if len(snapshots) < 1:
+            raise ValueError("at least one snapshot is required")
+        embeddings = torch.stack(
+            [self.encode_snapshot(snapshot, target=False) for snapshot in snapshots]
+        )
+        node_context, _ = self._fuse_node_context(snapshots, embeddings)
+        return node_context
+
+    def fuse_homophily(self, hop: Tensor, temporal: Tensor) -> Tensor:
+        scale = torch.sigmoid(self.homophily_residual_logit)
+        return hop + scale * self.homophily_residual(temporal)
+
+    def _raw_multihop(self, snapshot: Snapshot, hops: int = 5) -> Tensor:
+        state = snapshot.x
+        for _ in range(hops):
+            state = neighbor_mean_embeddings(snapshot, state, self.undirected)
+        return state
+
+    def infer_node_views(
+        self, window: Sequence[Snapshot], *, grad: bool = False
+    ) -> tuple[dict[str, Tensor], Tensor]:
+        """Return complementary readouts from the final snapshot in ``window``.
+
+        Self-supervised training still predicts the target from earlier context.
+        The node-classification readout uses the final snapshot of the window,
+        following the SpikeNet / SG-JEPA benchmark protocol.
+
+        Set ``grad=True`` during supervised fine-tuning so temporal and encoder
+        pathways can adapt the fused readout.
+        """
+        context = torch.enable_grad() if grad else torch.no_grad()
+        with context:
+            prepared = self.prepare_window(window)
+            output = self._node_predictions(prepared)
+            last = prepared.target_snapshot
+            views = self._content_views(last)
+            encoder = self.encode_snapshot(last, target=False)
+            temporal = self.encode_temporal_state(window)
+            blend = self.blend_content_hops(views)
+            fused = self.fuse_homophily(blend, temporal)
+            node_ids = output.node_ids
+            return (
+                {
+                    "content": views["content"][node_ids],
+                    "hop1": views["hop1"][node_ids],
+                    "hop2": views["hop2"][node_ids],
+                    "hop4": views["hop4"][node_ids],
+                    "hop5": views["hop5"][node_ids],
+                    "hop6": views["hop6"][node_ids],
+                    "hop8": views["hop8"][node_ids],
+                    "blend": blend[node_ids],
+                    "raw_hop5": self._raw_multihop(last, 5)[node_ids],
+                    "encoder": encoder[node_ids],
+                    "enc_hop4": self._encoder_multihop(last, 4)[node_ids],
+                    "enc_hop5": self._encoder_multihop(last, 5)[node_ids],
+                    "temporal": temporal[node_ids],
+                    "fused": fused[node_ids],
+                    "prediction": output.prediction,
+                },
+                node_ids,
+            )
+
+    def infer_nodes(self, window: Sequence[Snapshot]) -> tuple[Tensor, Tensor]:
+        views, node_ids = self.infer_node_views(window)
+        return views["fused"], node_ids
 
     def _pair_batch_loss(
         self,

@@ -1,5 +1,6 @@
-"""Building blocks of DyG-WM: snapshot encoder, positional/time encodings and
-the truncated path signature used by the pair-path and node-path branches."""
+"""Shared building blocks: GraphSAGE snapshot encoder, positional/time
+encodings, the truncated path signature (DyG-WM) and the PLIF spiking neuron
+(SG-JEPA)."""
 
 from __future__ import annotations
 
@@ -46,6 +47,41 @@ class GraphSAGE(nn.Module):
             if i + 1 < len(self.layers):
                 x = F.relu(x)
         return x
+
+
+class _SurrogateStep(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx: object, x: Tensor) -> Tensor:
+        ctx.save_for_backward(x)  # type: ignore[attr-defined]
+        return (x >= 0).to(x.dtype)
+
+    @staticmethod
+    def backward(ctx: object, grad_output: Tensor) -> tuple[Tensor]:
+        (x,) = ctx.saved_tensors  # type: ignore[attr-defined]
+        # Arctangent surrogate derivative, stable and commonly used for SNN BPTT.
+        return (grad_output / (1.0 + (torch.pi * x).square()),)
+
+
+class PLIF(nn.Module):
+    """Parametric LIF neuron of SG-JEPA (Eqs. 1-3 of the SG-JEPA paper)."""
+
+    def __init__(self, dim: int, threshold: float = 0.5, reset: float = 0.0) -> None:
+        super().__init__()
+        self.beta = nn.Parameter(torch.zeros(dim))
+        self.threshold = threshold
+        self.reset = reset
+
+    def forward(self, sequence: Tensor) -> Tensor:
+        """Return spikes [time, nodes, dim] for input with the same shape."""
+        voltage = torch.full_like(sequence[0], self.reset)
+        spikes = []
+        decay = torch.sigmoid(self.beta)
+        for current in sequence:
+            voltage = voltage + decay * (current - (voltage - self.reset))
+            spike = _SurrogateStep.apply(voltage - self.threshold)
+            voltage = voltage * (1.0 - spike) + self.reset * spike
+            spikes.append(spike)
+        return torch.stack(spikes)
 
 
 def sinusoidal_time_encoding(time: int, dim: int, device: torch.device) -> Tensor:

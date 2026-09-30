@@ -197,6 +197,98 @@ dygformer:
   train_batch_size: 200
   eval_pair_batch_size: 200
 
+# Original bipartite JODIE (coupled user/item RNNs, one-hot static
+# embeddings, item-embedding regression and t-batches).  Bipartite datasets
+# only (Wikipedia, MOOC, LastFM); the per-dataset interaction feature width
+# and state-change objective are set in the dataset entries.
+jodie_bipartite:
+  hidden_dim: 128
+  interaction_feature_dim: 172
+  tbatch_count: 500
+  state_change: true
+
+# Discrete-time self-supervised baselines.  Each is pretrained on the
+# chronological training snapshots only; the encoder is then frozen and
+# evaluated with a shared pair-MLP link probe under the same protocol.
+# CLDG follows the official code (GCN, four timespan views, InfoNCE at 0.07).
+cldg:
+  hidden_dim: 128
+  embedding_dim: 128
+  num_layers: 2
+  dropout: 0.0
+  num_spans: 4
+  num_views: 4
+  view_strategy: sequential
+  temperature: 0.07
+  contrastive_batch_size: 1024
+  probe_hidden_dim: 128
+
+# MaskDGNN (IJCAI'25), paper-level reimplementation.
+maskdgnn:
+  hidden_dim: 64
+  num_layers: 2
+  dropout: 0.1
+  window_size: 4
+  mask_ratio: 0.3
+  dynamics_ratio: 0.7
+  dynamics_weight: 1.0
+  existing_offset: 2.0
+  new_node_offset: -0.5
+  pagerank_damping: 0.85
+  pagerank_steps: 10
+  pretrain_pair_limit: 4096
+  probe_hidden_dim: 128
+
+# DVGMAE, paper-level reimplementation.
+dvgmae:
+  hidden_dim: 64
+  num_layers: 2
+  dropout: 0.1
+  window_size: 4
+  mask_ratio: 0.3
+  history_balance: 0.5
+  kl_weight: 0.001
+  feature_weight: 0.1
+  pretrain_pair_limit: 4096
+  probe_hidden_dim: 128
+
+jodie_bipartite_training:
+  epochs: 50
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  grad_clip: 1.0
+  patience: 20
+
+# Frozen-probe budget shared by the three snapshot SSL baselines.  These
+# sections are complete on their own (they do not inherit `training`).
+snapshot_ssl_training: &snapshot_ssl_training
+  probe_epochs: 50
+  probe_learning_rate: 0.001
+  probe_weight_decay: 0.00001
+  pair_batch_size: 400
+  grad_clip: 1.0
+  eval_every: 1
+  patience: 20
+  pretrain_log_every: 10
+
+cldg_training:
+  <<: *snapshot_ssl_training
+  pretrain_epochs: 100
+  pretrain_learning_rate: 0.004
+  pretrain_weight_decay: 0.0005
+
+maskdgnn_training:
+  <<: *snapshot_ssl_training
+  pretrain_epochs: 100
+  pretrain_learning_rate: 0.008
+  pretrain_weight_decay: 0.0
+
+dvgmae_training:
+  <<: *snapshot_ssl_training
+  pretrain_epochs: 100
+  pretrain_learning_rate: 0.001
+  pretrain_weight_decay: 0.00001
+
 # TGAT author-code optimizer defaults.
 tgat_training:
   epochs: 50
@@ -239,6 +331,7 @@ dygformer_training:
 # ----------------------------------------------------------------------------
 datasets:
   wikipedia:
+    jodie_bipartite: {interaction_feature_dim: 172, state_change: true}
     dyg_wm:
       hidden_dim: 128
       rwpe_dim: 4
@@ -267,6 +360,7 @@ datasets:
       patience: 12
 
   mooc:
+    jodie_bipartite: {interaction_feature_dim: 4, state_change: true}
     dyg_wm:
       shuffle_windows: false
       hidden_dim: 128
@@ -301,6 +395,7 @@ datasets:
     jodie: {dropout: 0.2}
 
   lastfm:
+    jodie_bipartite: {interaction_feature_dim: 2, state_change: false}
     dyrep: {dropout: 0.0}
     tgat: {uniform_neighbors: false}
     tgn: {dropout: 0.3}

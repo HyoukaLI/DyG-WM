@@ -6,4 +6,12 @@ saved_models/
 saved_results/
 DG_data/*
 !DG_data/DATASETS_README.md
+!DG_data/tmall/
+DG_data/tmall/*
+!DG_data/tmall/tmall.txt.gz
+!DG_data/tmall/node2label.txt
+processed_data/dblp.npz
+processed_data/tmall.npz
+processed_data/patent.npz
+*.npy
 .DS_Store

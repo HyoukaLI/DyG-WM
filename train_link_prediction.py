@@ -20,8 +20,15 @@ import torch
 from torch import nn
 
 from models.DyGLibAdapter import DyGLibLinkBaseline
-from models.EdgeBank import EdgeBankLinkBaseline
 from models.DyGWM import DyGWM
+from models.EdgeBank import EdgeBankLinkBaseline
+from models.JODIE import JODIELinkBaseline
+from models.SnapshotSSL import (
+    CLDGLinkBaseline,
+    DVGMAELinkBaseline,
+    MaskDGNNLinkBaseline,
+    SnapshotSSLLinkBaseline,
+)
 from models.TGAT import TGATLinkBaseline
 from utils.DataLoader import DynamicGraph, load_npz
 from utils.inductive_setting import (
@@ -37,6 +44,7 @@ from utils.link_utils import (
 from utils.load_configs import (
     DATASETS,
     MODEL_KEYS,
+    SNAPSHOT_SSL_MODELS,
     load_config,
     model_arguments,
     model_key,
@@ -54,6 +62,11 @@ from utils.utils import (
 )
 
 DYGLIB_MODELS = ("jodie", "dyrep", "tgn", "cawn", "tcl", "graphmixer", "dygformer")
+SNAPSHOT_SSL_CLASSES = {
+    "cldg": CLDGLinkBaseline,
+    "maskdgnn": MaskDGNNLinkBaseline,
+    "dvgmae": DVGMAELinkBaseline,
+}
 
 
 # ----------------------------------------------------------------------------
@@ -268,6 +281,25 @@ def build_model(key: str, config: dict, data: LinkData, device: torch.device) ->
         ).to(device)
         model.prepare_streams(graph.snapshots, data.train_snapshots)
         return model
+    if key == "jodie_bipartite":
+        if graph.num_source_nodes is None:
+            raise ValueError("JODIE-Bipartite requires a bipartite user-item graph")
+        model = JODIELinkBaseline(
+            feature_dim=graph.feature_dim,
+            num_nodes=graph.num_nodes,
+            **{**arguments, **runtime},
+        ).to(device)
+        # The original implementation standardises event gaps and chooses the
+        # t-batch span from the complete stream (a preprocessing detail, not a
+        # learned use of validation/test labels).
+        model.fit_stream_statistics(
+            graph.snapshots, JODIELinkBaseline._unique_snapshots(data.split.train)
+        )
+        return model
+    if key in SNAPSHOT_SSL_CLASSES:
+        return SNAPSHOT_SSL_CLASSES[key](
+            feature_dim=graph.feature_dim, **{**arguments, **runtime}
+        ).to(device)
     if key == "edgebank":
         model = EdgeBankLinkBaseline(
             num_nodes=graph.num_nodes, **{**arguments, **runtime}
@@ -291,8 +323,12 @@ def build_model(key: str, config: dict, data: LinkData, device: torch.device) ->
 
 
 def is_event_model(model: nn.Module) -> bool:
-    """TGAT and the DyGLib backbones use their native event-stream loops."""
-    return isinstance(model, (TGATLinkBaseline, DyGLibLinkBaseline, EdgeBankLinkBaseline))
+    """JODIE, TGAT, EdgeBank and the DyGLib backbones use their native
+    event-stream evaluation."""
+    return isinstance(
+        model,
+        (JODIELinkBaseline, TGATLinkBaseline, DyGLibLinkBaseline, EdgeBankLinkBaseline),
+    )
 
 
 def evaluate_windows(
@@ -331,6 +367,8 @@ def final_evaluation(
     negative strategy (and new-node setting)."""
     split, inductive = data.split, data.inductive
     pair_batch_size = training.get("pair_batch_size")
+    if isinstance(model, SnapshotSSLLinkBaseline):
+        pair_batch_size = int(training.get("pair_batch_size", 512))
     validation_query_seed = int(training.get("validation_query_seed", 0))
     test_query_seed = int(training.get("test_query_seed", 2))
     model.eval()
@@ -435,7 +473,11 @@ def train_model(
 
     def train_step(epoch: int) -> tuple[dict, float]:
         model.train()
-        if isinstance(model, DyGLibLinkBaseline):
+        if isinstance(model, JODIELinkBaseline):
+            metrics = model.train_epoch(
+                split.train, optimizer, float(training["grad_clip"])
+            )
+        elif isinstance(model, DyGLibLinkBaseline):
             metrics = model.train_epoch(
                 split.train, optimizer, float(training["grad_clip"]), seed=seed
             )
@@ -494,6 +536,99 @@ def train_model(
     if best_state is None:
         raise RuntimeError(f"{name} did not produce a validation checkpoint")
     return best_state, best_epoch
+
+
+def train_snapshot_ssl(
+    name: str,
+    model: SnapshotSSLLinkBaseline,
+    data: LinkData,
+    training: dict,
+    seed: int,
+    logger,
+) -> tuple[dict[str, torch.Tensor], int]:
+    """Snapshot SSL baselines: native self-supervised pretraining on the
+    training snapshots, then a frozen-encoder pair-MLP link probe selected on
+    validation.  Returns the full model state with the selected probe."""
+    split = data.split
+    pretrain_optimizer = torch.optim.Adam(
+        model.pretrain_parameters(),
+        lr=float(training["pretrain_learning_rate"]),
+        weight_decay=float(training.get("pretrain_weight_decay", 0.0)),
+    )
+    train_snapshots = unique_snapshots(split.train)
+    pretrain_epochs = int(training["pretrain_epochs"])
+    grad_clip = float(training.get("grad_clip", 1.0))
+    for epoch in range(1, pretrain_epochs + 1):
+        metrics = model.pretrain_epoch(
+            train_snapshots, pretrain_optimizer, grad_clip, seed + epoch * 10_000
+        )
+        if not np.isfinite(float(metrics["loss"])):
+            raise RuntimeError(f"{name} produced a non-finite SSL loss at epoch {epoch}")
+        if (
+            epoch == 1
+            or epoch % int(training.get("pretrain_log_every", 10)) == 0
+            or epoch == pretrain_epochs
+        ):
+            logger.info(
+                json.dumps({"model": name, "stage": "ssl_pretrain", "epoch": epoch, "train": metrics})
+            )
+
+    model.freeze_encoder()
+    model.eval()
+    model.probe.train()
+    probe_optimizer = torch.optim.Adam(
+        model.probe.parameters(),
+        lr=float(training["probe_learning_rate"]),
+        weight_decay=float(training.get("probe_weight_decay", 0.0)),
+    )
+    probe_epochs = int(training["probe_epochs"])
+    eval_every = int(training.get("eval_every", 1))
+    pair_batch_size = int(training.get("pair_batch_size", 512))
+    patience = int(training.get("patience", 0))
+    validation_query_seed = int(training.get("validation_query_seed", 0))
+    stale_evaluations = 0
+    checkpoint_metrics = tuple(training.get("checkpoint_metrics", ("ap",)))
+    if not checkpoint_metrics:
+        raise ValueError("checkpoint_metrics must not be empty")
+    best_metrics = {metric: float("-inf") for metric in checkpoint_metrics}
+    best_epoch = 0
+    best_probe_state: dict[str, torch.Tensor] | None = None
+    for epoch in range(1, probe_epochs + 1):
+        metrics = model.train_probe_epoch(
+            split.train, probe_optimizer, grad_clip, pair_batch_size, seed + epoch * 10_000
+        )
+        if epoch == 1 or epoch % eval_every == 0 or epoch == probe_epochs:
+            validation = model.evaluate_windows(
+                split.validation,
+                pair_batch_size=pair_batch_size,
+                query_seed=validation_query_seed,
+            )
+            logger.info(
+                json.dumps(
+                    {
+                        "model": name,
+                        "stage": "frozen_link_probe",
+                        "epoch": epoch,
+                        "train": metrics,
+                        "validation": validation,
+                    }
+                )
+            )
+            if all(
+                validation[metric] >= best_metrics[metric] for metric in checkpoint_metrics
+            ):
+                best_metrics = {metric: validation[metric] for metric in checkpoint_metrics}
+                best_epoch = epoch
+                best_probe_state = cpu_state_dict(model.probe)
+                stale_evaluations = 0
+            else:
+                stale_evaluations += 1
+            if patience > 0 and stale_evaluations >= patience:
+                break
+    if best_probe_state is None:
+        raise RuntimeError(f"{name} did not produce a frozen-probe checkpoint")
+    model.probe.load_state_dict(best_probe_state)
+    return cpu_state_dict(model), best_epoch
 
 
 # ----------------------------------------------------------------------------
@@ -562,7 +697,12 @@ def main() -> None:
     setting = normalize_setting(args.setting)
     config = load_config(args.config, args.dataset_name)
     if args.num_epochs is not None:
-        config.setdefault(f"{key}_training", {})["epochs"] = args.num_epochs
+        section = config.setdefault(f"{key}_training", {})
+        if key in SNAPSHOT_SSL_MODELS:
+            section["pretrain_epochs"] = args.num_epochs
+            section["probe_epochs"] = args.num_epochs
+        else:
+            section["epochs"] = args.num_epochs
     training = training_arguments(config, key)
     seeds = args.seeds if args.seeds is not None else list(config.get("seeds", [0]))
     device = get_device(args.gpu)
@@ -602,9 +742,14 @@ def main() -> None:
 
         best_epoch = 0
         if key != "edgebank":
-            best_state, best_epoch = train_model(
-                args.model_name, model, data, training, seed, logger
-            )
+            if key in SNAPSHOT_SSL_MODELS:
+                best_state, best_epoch = train_snapshot_ssl(
+                    args.model_name, model, data, training, seed, logger
+                )
+            else:
+                best_state, best_epoch = train_model(
+                    args.model_name, model, data, training, seed, logger
+                )
             model.load_state_dict(best_state)
             checkpoint = (
                 args.save_model_dir / model_dir / args.dataset_name / f"{model_dir}_seed{seed}"
@@ -626,6 +771,14 @@ def main() -> None:
 
         validation, test = final_evaluation(model, data, training)
         test["best_epoch"] = float(best_epoch)
+        if key in SNAPSHOT_SSL_MODELS:
+            test.update(
+                {
+                    "pretrain_epochs": float(training["pretrain_epochs"]),
+                    "protocol": "ssl_pretrain_then_frozen_link_probe",
+                    "implementation": model.implementation,
+                }
+            )
         result = {"validation": validation, "test": test}
         assert_full_event_coverage(
             args.model_name,

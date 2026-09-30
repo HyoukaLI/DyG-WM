@@ -1,9 +1,10 @@
 # Datasets
 
-The processed archives used in the paper are already included in
-`processed_data/` (one `.npz` per dataset), so no download is needed to
-reproduce the results. This folder is only needed to rebuild them from the
-raw data.
+## Link prediction
+
+The eleven processed link-prediction archives are included in
+`processed_data/`, so no download is needed. This folder is only needed to
+rebuild them from the raw data.
 
 | Dataset | Type | Raw source | Raw files expected here |
 | --- | --- | --- | --- |
@@ -33,3 +34,33 @@ Each event stream is cut into 50 snapshots of equal event count. Duplicate
 events, exact timestamps and event order are kept as the per-snapshot link
 queries, so the continuous-time baselines still read the original stream;
 feature normalisation is fit on the chronological training prefix only.
+
+## Node classification (DBLP, Tmall, Patent)
+
+The node benchmarks follow the SpikeNet / SG-JEPA protocol: cumulative
+snapshots with 80-dimensional per-snapshot DeepWalk node features. These
+archives are too large for the repository and are prepared separately:
+
+```bash
+bash preprocess_data/download_node_data.sh      # dblp.npz + Tmall / Patent DeepWalk features
+python preprocess_data/preprocess_spikenet_node.py --dataset tmall
+python preprocess_data/preprocess_spikenet_node.py --dataset patent   # needs the Patent raw files
+```
+
+| Dataset | Raw files in `DG_data/<dataset>/` | Snapshots |
+| --- | --- | --- |
+| DBLP | `dblp.txt`, `node2label.txt`, `dblp.npy` | 27 |
+| Tmall | `tmall.txt.gz`, `node2label.txt` (included), `tmall.npy` | 186 merged by 10 → 19 |
+| Patent | `patent_edges.json`, `patent_nodes.json` (SpikeNet release), `patent.npy` | 25 merged by 2 → 13 |
+
+The DeepWalk features can also be regenerated with the official SpikeNet
+recipe (needs `pip install gensim numba scipy tqdm`; hours for Tmall, about a
+day for Patent):
+
+```bash
+python preprocess_data/generate_deepwalk_features.py --dataset tmall
+```
+
+Without `<dataset>.npy` the converters fall back to 4-dimensional structural
+features, which do **not** reproduce the protocol; the loader refuses such
+archives unless `DYGWM_ALLOW_STRUCTURAL_FALLBACK=1` is set.
