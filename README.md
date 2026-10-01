@@ -254,13 +254,3 @@ If you find this work helpful, please cite our paper:
   year    = {}
 }
 ```
-
----
-
-## 🤝 Acknowledgements
-
-The link-prediction baselines and evaluation protocol build on
-[DyGLib](https://github.com/yule-BUAA/DyGLib) (MIT license, see
-`models/LICENSE_DyGLib`), and the node-classification protocol follows
-[SpikeNet](https://github.com/EdisonLeeeee/SpikeNet) and SG-JEPA. We thank the
-authors for making their code publicly available.
