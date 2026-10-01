@@ -195,7 +195,7 @@ MODEL=SG-JEPA bash run_node_classification.sh dblp     # a baseline on one datas
 | --- | --- |
 | `--model_name` | `DyG-WM`, `JODIE`, `DyRep`, `TGAT`, `TGN`, `CAWN`, `EdgeBank`, `TCL`, `GraphMixer`, `DyGFormer` |
 | `--gpu` | GPU index, `-1` for CPU, `auto` for CUDA → MPS → CPU |
-| `--seeds 0 1 2` | override the default seeds (link `0 1 2 3 4`, node `42 44 46 48 50`) |
+| `--seeds 0 1 2` | override the default seeds|
 | `--num_epochs` | override the number of training epochs |
 | `--config` | configuration file |
 
