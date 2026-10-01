@@ -245,12 +245,3 @@ DyGLib-reported settings of the baselines, are in
 ## 📌 Citation
 
 If you find this work helpful, please cite our paper:
-
-```bibtex
-@article{dygwm,
-  title   = {Predictive Dynamic Graph World Modelling: From Temporal Context to Future Relations},
-  author  = {},
-  journal = {},
-  year    = {}
-}
-```
